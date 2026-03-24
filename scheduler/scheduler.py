@@ -207,10 +207,12 @@ class SpacedRepetitionScheduler:
         if not items:
             return []
 
-        # Group by category (empty category → use concept_id as unique group)
+        # Group by category.  Concepts without an explicit category are
+        # collected under a shared "_uncategorized" key so they can still
+        # be interleaved with categorized items.
         buckets: dict[str, list[tuple[str, float]]] = defaultdict(list)
         for cid, iv, cat in items:
-            key = cat if cat else cid
+            key = cat if cat else "_uncategorized"
             buckets[key].append((cid, iv))
 
         # Sort category keys by the urgency of their first item so that the

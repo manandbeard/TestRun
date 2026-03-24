@@ -129,8 +129,14 @@ class ReptileTrainer:
     # ------------------------------------------------------------------
 
     def _cosine_meta_lr(self, epoch: int, total_epochs: int) -> float:
-        """Return the meta-LR for the current epoch using cosine annealing."""
-        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * epoch / max(total_epochs, 1)))
+        """Return the meta-LR for the current epoch using cosine annealing.
+
+        When *total_epochs* ≤ 0 the schedule degenerates and returns
+        ``meta_lr`` unchanged (no annealing).
+        """
+        if total_epochs <= 0:
+            return self.meta_lr
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * epoch / total_epochs))
         return self.meta_lr_min + (self.meta_lr - self.meta_lr_min) * cosine_decay
 
     # ------------------------------------------------------------------

@@ -143,7 +143,10 @@ class ConceptState:
         if score >= 0.6:
             # Successful recall – stability grows
             retrievability = self.retrievability(elapsed_days)
-            retrieval_bonus = 1.0 - retrievability  # desirable-difficulty bonus
+            # Desirable-difficulty bonus (Bjork & Bjork 2011): when retrieval
+            # was harder (lower retrievability), the bonus is larger, which
+            # amplifies stability growth — rewarding effortful recall.
+            retrieval_bonus = 1.0 - retrievability
             growth = (
                 _STABILITY_GROWTH_BASE
                 * math.exp(-_STABILITY_DIFFICULTY_DECAY * self.difficulty)
@@ -202,8 +205,8 @@ class ConceptState:
                 running_s,
                 norm_count,
             ])
-            # Replay D/S updates so the feature vector at each step reflects
-            # the state *before* that review.  After appending we advance.
+            # After appending the feature vector with pre-review state, update
+            # D/S for the next iteration so subsequent steps see post-review state.
             delta_d = -_DIFFICULTY_WEIGHT * (r.score - 0.6)
             mean_revert = _DIFFICULTY_MEAN_REVERSION * (_INITIAL_DIFFICULTY - running_d)
             running_d = max(0.0, min(1.0, running_d + delta_d + mean_revert))
