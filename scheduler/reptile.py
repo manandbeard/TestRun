@@ -4,13 +4,22 @@ Reptile (Nichol et al., 2018) is a first-order meta-learning algorithm that
 learns a weight initialisation θ from which fast adaptation to individual
 users (tasks) is possible with only a few gradient steps.
 
+Improvements over vanilla Reptile
+----------------------------------
+* **Cosine-annealed meta-LR** – smoothly decays ε from ``meta_lr`` to
+  ``meta_lr_min`` over training, improving convergence stability (Loshchilov
+  & Hutter 2016 applied to the outer loop).
+* **Gradient clipping** – the inner-loop SGD clips gradients to
+  ``max_grad_norm`` to prevent exploding-gradient issues common with LSTMs.
+
 Meta-update rule
 ----------------
 For each meta-iteration:
   1. Sample a mini-batch of tasks (users).
   2. For each task, clone θ and run ``inner_steps`` SGD updates on the
      task's labelled data to obtain θ'_i.
-  3. Update θ  ←  θ + ε * (mean(θ'_i) − θ).
+  3. Update θ  ←  θ + ε_t * (mean(θ'_i) − θ), where ε_t follows a cosine
+     schedule.
 
 Usage
 -----
@@ -21,6 +30,7 @@ Usage
 from __future__ import annotations
 
 import copy
+import math
 import random
 from typing import Callable, List, Optional, Sequence, Tuple
 
@@ -52,19 +62,21 @@ def build_task_sample(
     Parameters
     ----------
     feature_sequence:
-        ``[elapsed_days, score]`` pairs from :meth:`ConceptState.as_feature_sequence`.
+        Feature vectors from :meth:`ConceptState.as_feature_sequence`.
+        Each inner list has five elements: ``[elapsed_days, score,
+        difficulty, stability, norm_review_count]``.
     query_interval_days:
         The prospective interval being evaluated.
     recall_label:
         Ground-truth recall outcome (1.0 = recalled, 0.0 = forgot).
     """
     if not feature_sequence:
-        feature_sequence = [[0.0, 0.0]]
+        feature_sequence = [[0.0, 0.0, 0.3, 1.0, 0.0]]
 
     seq = []
-    for i, (elapsed, score) in enumerate(feature_sequence):
+    for i, feats in enumerate(feature_sequence):
         interval = query_interval_days if i == len(feature_sequence) - 1 else 0.0
-        seq.append([elapsed, score, interval])
+        seq.append(list(feats) + [interval])
 
     x = torch.tensor(seq, dtype=torch.float32)
     y = torch.tensor(recall_label, dtype=torch.float32)
@@ -83,7 +95,11 @@ class ReptileTrainer:
     inner_steps:
         Number of gradient steps taken per task in the inner loop.
     meta_lr:
-        Step size ε for the Reptile outer update.
+        Initial step size ε for the Reptile outer update.
+    meta_lr_min:
+        Minimum meta-LR reached at end of cosine schedule (default 0.001).
+    max_grad_norm:
+        Maximum gradient norm for inner-loop gradient clipping (default 5.0).
     device:
         Torch device to use (defaults to CPU).
     """
@@ -94,15 +110,28 @@ class ReptileTrainer:
         inner_lr: float = 0.01,
         inner_steps: int = 5,
         meta_lr: float = 0.1,
+        meta_lr_min: float = 0.001,
+        max_grad_norm: float = 5.0,
         device: Optional[torch.device] = None,
     ) -> None:
         self.model = model
         self.inner_lr = inner_lr
         self.inner_steps = inner_steps
         self.meta_lr = meta_lr
+        self.meta_lr_min = meta_lr_min
+        self.max_grad_norm = max_grad_norm
         self.device = device or torch.device("cpu")
         self.model.to(self.device)
         self._criterion = nn.BCELoss()
+
+    # ------------------------------------------------------------------
+    # Cosine-annealed meta-LR
+    # ------------------------------------------------------------------
+
+    def _cosine_meta_lr(self, epoch: int, total_epochs: int) -> float:
+        """Return the meta-LR for the current epoch using cosine annealing."""
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * epoch / max(total_epochs, 1)))
+        return self.meta_lr_min + (self.meta_lr - self.meta_lr_min) * cosine_decay
 
     # ------------------------------------------------------------------
     # Inner loop: adapt a cloned model to one task
@@ -129,6 +158,12 @@ class ReptileTrainer:
             optimiser.zero_grad()
             avg_loss = total_loss / len(task_samples)
             avg_loss.backward()
+
+            # Gradient clipping for LSTM stability
+            nn.utils.clip_grad_norm_(
+                fast_model.parameters(), self.max_grad_norm,
+            )
+
             optimiser.step()
 
         return fast_model
@@ -137,7 +172,11 @@ class ReptileTrainer:
     # Outer (Reptile) update
     # ------------------------------------------------------------------
 
-    def _reptile_update(self, adapted_models: List[RecallLSTM]) -> None:
+    def _reptile_update(
+        self,
+        adapted_models: List[RecallLSTM],
+        effective_lr: float,
+    ) -> None:
         """Apply the Reptile update: θ ← θ + ε * (mean(θ'_i) − θ)."""
         meta_params = dict(self.model.named_parameters())
 
@@ -154,7 +193,7 @@ class ReptileTrainer:
         with torch.no_grad():
             for name, meta_param in meta_params.items():
                 theta_prime = mean_adapted[name] / n
-                meta_param.data += self.meta_lr * (theta_prime - meta_param.data)
+                meta_param.data += effective_lr * (theta_prime - meta_param.data)
 
     # ------------------------------------------------------------------
     # Public training API
@@ -218,7 +257,9 @@ class ReptileTrainer:
                         batch_loss += loss.item()
                     inner_losses.append(batch_loss / len(task))
 
-            self._reptile_update(adapted_models)
+            # Cosine-annealed meta-LR
+            effective_lr = self._cosine_meta_lr(epoch, epochs)
+            self._reptile_update(adapted_models, effective_lr)
 
             avg_loss = sum(inner_losses) / len(inner_losses)
             epoch_losses.append(avg_loss)

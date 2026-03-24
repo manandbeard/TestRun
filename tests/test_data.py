@@ -83,7 +83,10 @@ class TestConceptState:
         cs = self._make_concept()
         seq = cs.as_feature_sequence()
         assert len(seq) == 3
-        assert seq[0] == [0.0, 0.9]
+        # Each feature vector now has 5 elements
+        assert len(seq[0]) == 5
+        assert seq[0][0] == 0.0     # elapsed_days
+        assert seq[0][1] == 0.9     # score
         assert seq[1][0] == pytest.approx(5.0, abs=1e-4)
 
     def test_stability_estimate_no_reviews(self):
@@ -94,6 +97,65 @@ class TestConceptState:
         cs = self._make_concept()
         stab = cs.stability_estimate()
         assert stab > 0  # should be a positive number
+
+    # ---- New FSRS-inspired state tests ----
+
+    def test_difficulty_initialised(self):
+        cs = ConceptState(concept_id="c0")
+        assert cs.difficulty == pytest.approx(0.3)
+
+    def test_stability_initialised(self):
+        cs = ConceptState(concept_id="c0")
+        assert cs.stability == pytest.approx(1.0)
+
+    def test_difficulty_decreases_on_high_score(self):
+        cs = ConceptState(concept_id="c0")
+        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        cs.add_review(score=1.0, timestamp=base)
+        assert cs.difficulty < 0.3
+
+    def test_difficulty_increases_on_low_score(self):
+        cs = ConceptState(concept_id="c0")
+        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        cs.add_review(score=0.0, timestamp=base)
+        assert cs.difficulty > 0.3
+
+    def test_stability_grows_on_success(self):
+        cs = ConceptState(concept_id="c0")
+        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        cs.add_review(score=0.9, timestamp=base)
+        cs.add_review(score=0.9, timestamp=base + timedelta(days=5))
+        assert cs.stability > 1.0
+
+    def test_stability_shrinks_on_failure(self):
+        cs = ConceptState(concept_id="c0")
+        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        cs.add_review(score=0.9, timestamp=base)
+        s_after_success = cs.stability
+        cs.add_review(score=0.2, timestamp=base + timedelta(days=5))
+        assert cs.stability < s_after_success
+
+    def test_retrievability_power_law(self):
+        cs = ConceptState(concept_id="c0", stability=10.0)
+        # R(t) = (1 + t/S)^(-1)
+        assert cs.retrievability(0.0) == pytest.approx(1.0)
+        assert cs.retrievability(10.0) == pytest.approx(0.5)
+        assert cs.retrievability(30.0) == pytest.approx(0.25)
+
+    def test_category_field(self):
+        cs = ConceptState(concept_id="c0", category="math")
+        assert cs.category == "math"
+
+    def test_feature_sequence_contains_difficulty_and_stability(self):
+        cs = ConceptState(concept_id="c0")
+        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        cs.add_review(score=0.8, timestamp=base)
+        seq = cs.as_feature_sequence()
+        # [elapsed_days, score, difficulty, stability, norm_review_count]
+        assert len(seq[0]) == 5
+        assert seq[0][2] == pytest.approx(0.3)   # initial difficulty
+        assert seq[0][3] == pytest.approx(1.0)    # initial stability
+        assert seq[0][4] == pytest.approx(1.0)    # norm review count (1/1)
 
 
 # ---------------------------------------------------------------------------
@@ -123,3 +185,8 @@ class TestUserState:
         cs2.add_review(0.8, base)
         cs2.add_review(0.7, base + timedelta(days=3))
         assert user.total_reviews() == 3
+
+    def test_get_or_create_concept_with_category(self):
+        user = UserState(user_id="u1")
+        cs = user.get_or_create_concept("c1", category="math")
+        assert cs.category == "math"

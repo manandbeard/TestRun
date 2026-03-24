@@ -1,15 +1,21 @@
-"""LSTM model for predicting recall probability.
+"""Attention-augmented LSTM model for predicting recall probability.
 
 The :class:`RecallLSTM` takes a variable-length sequence of past reviews
-``(elapsed_days, score)`` and predicts the probability that the student will
-recall the concept after a given future interval ``query_interval_days``.
+and predicts the probability that the student will recall the concept after
+a given future interval ``query_interval_days``.
 
 Architecture
 ------------
-Input  : [elapsed_days, score, query_interval_days]  – one time step per review
-         (the query interval is appended at the *last* time step only; earlier
-         steps use 0).
+Input  : [elapsed_days, score, difficulty, stability, norm_review_count,
+          query_interval_days]  – one time step per review.  The query
+         interval is appended at the *last* time step only; earlier steps
+         use 0.
 LSTM   : ``hidden_size`` units, ``num_layers`` stacked layers.
+Attention : Learned scalar attention weights over LSTM hidden states so that
+            the model can focus on the most informative past reviews
+            (e.g. recent reviews and difficult retrievals carry more
+            signal – consistent with desirable-difficulties theory,
+            Bjork & Bjork 2011).
 Output : sigmoid-activated scalar – P(recall | history, interval).
 """
 
@@ -21,13 +27,14 @@ from torch import Tensor
 
 
 class RecallLSTM(nn.Module):
-    """LSTM that predicts recall probability for a queried future interval.
+    """Attention-augmented LSTM that predicts recall probability.
 
     Parameters
     ----------
     input_size:
-        Number of input features per time step (default 3:
-        ``elapsed_days``, ``score``, ``query_interval``).
+        Number of input features per time step (default 6:
+        ``elapsed_days``, ``score``, ``difficulty``, ``stability``,
+        ``norm_review_count``, ``query_interval``).
     hidden_size:
         Number of hidden units in each LSTM layer.
     num_layers:
@@ -39,7 +46,7 @@ class RecallLSTM(nn.Module):
 
     def __init__(
         self,
-        input_size: int = 3,
+        input_size: int = 6,
         hidden_size: int = 64,
         num_layers: int = 2,
         dropout: float = 0.1,
@@ -56,6 +63,10 @@ class RecallLSTM(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0.0,
         )
+
+        # Attention layer: learn which past reviews are most informative
+        self.attention = nn.Linear(hidden_size, 1)
+
         self.output_layer = nn.Linear(hidden_size, 1)
 
     # ------------------------------------------------------------------
@@ -63,7 +74,7 @@ class RecallLSTM(nn.Module):
     # ------------------------------------------------------------------
 
     def forward(self, x: Tensor) -> Tensor:
-        """Run the LSTM and return recall probability.
+        """Run the LSTM with attention and return recall probability.
 
         Parameters
         ----------
@@ -75,10 +86,18 @@ class RecallLSTM(nn.Module):
         Tensor
             Recall probability, shape ``(batch,)``.
         """
-        _, (h_n, _) = self.lstm(x)
-        # Use the final hidden state of the top layer
-        last_hidden = h_n[-1]  # (batch, hidden_size)
-        logit = self.output_layer(last_hidden).squeeze(-1)  # (batch,)
+        outputs, _ = self.lstm(x)  # (batch, seq_len, hidden_size)
+
+        # Attention: learn importance weights across time steps
+        attn_scores = self.attention(outputs).squeeze(-1)  # (batch, seq_len)
+        attn_weights = torch.softmax(attn_scores, dim=-1)  # (batch, seq_len)
+
+        # Weighted sum of hidden states → context vector
+        context = torch.bmm(
+            attn_weights.unsqueeze(1), outputs
+        ).squeeze(1)  # (batch, hidden_size)
+
+        logit = self.output_layer(context).squeeze(-1)  # (batch,)
         return torch.sigmoid(logit)
 
     # ------------------------------------------------------------------
@@ -96,8 +115,10 @@ class RecallLSTM(nn.Module):
         Parameters
         ----------
         feature_sequence:
-            List of ``[elapsed_days, score]`` pairs (output of
-            :meth:`ConceptState.as_feature_sequence`).
+            List of feature vectors from
+            :meth:`ConceptState.as_feature_sequence`.  Each inner list has
+            five elements: ``[elapsed_days, score, difficulty, stability,
+            norm_review_count]``.
         query_interval_days:
             The prospective interval (days) we want to evaluate recall for.
         device:
@@ -113,13 +134,14 @@ class RecallLSTM(nn.Module):
 
         if not feature_sequence:
             # No history – use a single synthetic step
-            feature_sequence = [[0.0, 0.0]]
+            feature_sequence = [[0.0, 0.0, 0.3, 1.0, 0.0]]
 
-        # Build tensor: [elapsed_days, score, query_interval (only at last step)]
+        # Build tensor: append query_interval as the last feature at the
+        # final time step (0 elsewhere).
         seq = []
-        for i, (elapsed, score) in enumerate(feature_sequence):
+        for i, feats in enumerate(feature_sequence):
             interval = query_interval_days if i == len(feature_sequence) - 1 else 0.0
-            seq.append([elapsed, score, interval])
+            seq.append(list(feats) + [interval])
 
         x = torch.tensor(seq, dtype=torch.float32, device=device).unsqueeze(0)
         self.eval()

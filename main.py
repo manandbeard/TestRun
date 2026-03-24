@@ -35,9 +35,16 @@ torch.manual_seed(SEED)
 # Synthetic data generation
 # ---------------------------------------------------------------------------
 
+CATEGORIES = ["math", "science", "history", "language"]
+
+
 def _forgetting_curve(elapsed_days: float, stability: float) -> float:
-    """Ebbinghaus-style probability of recall after *elapsed_days* days."""
-    return math.exp(-elapsed_days / max(stability, 1e-6))
+    """Power-law probability of recall after *elapsed_days* days.
+
+    Uses the research-backed power-law curve R(t) = (1 + t/S)^(-1)
+    (Wixted & Ebbesen 1991) instead of Ebbinghaus exponential.
+    """
+    return (1.0 + elapsed_days / max(stability, 1e-6)) ** (-1.0)
 
 
 def _simulate_user(
@@ -52,8 +59,9 @@ def _simulate_user(
 
     for c in range(n_concepts):
         concept_id = f"{user_id}_c{c}"
+        category = CATEGORIES[c % len(CATEGORIES)]
         stability = random.uniform(*stability_range)
-        cs = user.get_or_create_concept(concept_id)
+        cs = user.get_or_create_concept(concept_id, category=category)
 
         elapsed = 0.0
         for rev in range(reviews_per_concept):
@@ -85,7 +93,13 @@ def _simulate_user(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    print("=== LSTM + Reptile Spaced-Repetition Scheduler Demo ===\n")
+    print("=== Attention-LSTM + Reptile Spaced-Repetition Scheduler Demo ===\n")
+    print("Research-backed improvements:")
+    print("  • Power-law forgetting curve (Wixted & Ebbesen 1991)")
+    print("  • FSRS-inspired difficulty/stability tracking (Ye 2023)")
+    print("  • Attention over review history (desirable difficulties)")
+    print("  • Cosine-annealed meta-LR + gradient clipping")
+    print("  • Interleaved scheduling (Rohrer et al. 2015)\n")
 
     # 1. Build meta-training dataset (10 simulated users)
     print("Generating synthetic user data …")
@@ -95,12 +109,19 @@ def main() -> None:
         all_tasks.append(task)
     print(f"  {len(all_tasks)} meta-training tasks generated.\n")
 
-    # 2. Initialise model + trainer
-    model = RecallLSTM(input_size=3, hidden_size=64, num_layers=2, dropout=0.1)
-    trainer = ReptileTrainer(model, inner_lr=0.01, inner_steps=5, meta_lr=0.1)
+    # 2. Initialise model + trainer (input_size=6: 5 features + query_interval)
+    model = RecallLSTM(input_size=6, hidden_size=64, num_layers=2, dropout=0.1)
+    trainer = ReptileTrainer(
+        model,
+        inner_lr=0.01,
+        inner_steps=5,
+        meta_lr=0.1,
+        meta_lr_min=0.001,
+        max_grad_norm=5.0,
+    )
 
     # 3. Meta-train
-    print("Running Reptile meta-training (50 epochs) …")
+    print("Running Reptile meta-training (50 epochs, cosine LR) …")
     losses = trainer.meta_train(
         all_tasks,
         epochs=50,
@@ -123,12 +144,15 @@ def main() -> None:
     print("Personalising model to new student (10 fine-tuning steps) …")
     personal_model = trainer.personalise(new_task, steps=10)
 
-    # 6. Schedule next reviews
-    print("\nRecommended next-review intervals for new student:")
+    # 6. Schedule next reviews (with interleaving)
+    print("\nRecommended next-review intervals (interleaved by category):")
     scheduler = SpacedRepetitionScheduler(personal_model, target_recall=0.9)
-    due = scheduler.due_concepts(new_user)
+    due = scheduler.due_concepts(new_user, interleave=True)
     for concept_id, interval in due:
-        print(f"  {concept_id:30s}  → {interval:.1f} days")
+        cs = new_user.concept_states[concept_id]
+        cat_label = f"[{cs.category}]" if cs.category else ""
+        print(f"  {concept_id:30s} {cat_label:12s}  → {interval:.1f} days"
+              f"  (D={cs.difficulty:.2f}, S={cs.stability:.1f})")
 
     print("\nDone.")
 

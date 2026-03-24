@@ -4,8 +4,14 @@ Three core abstractions:
 
 * :class:`ReviewEvent`  – a single study event for one (user, concept) pair.
 * :class:`ConceptState` – accumulated review history for one concept owned by
-  a specific user.
+  a specific user, with FSRS-inspired difficulty/stability tracking.
 * :class:`UserState`    – collection of all concept states for one user.
+
+Research references
+-------------------
+* Power-law forgetting: Wixted & Ebbesen (1991), Wixted (2004).
+* FSRS state model:  Ye (2023) – Free Spaced Repetition Scheduler.
+* Desirable difficulties / retrieval effort: Bjork & Bjork (2011).
 """
 
 from __future__ import annotations
@@ -45,9 +51,31 @@ class ReviewEvent:
             )
 
 
+# ---------------------------------------------------------------------------
+# FSRS-inspired parameter defaults
+# ---------------------------------------------------------------------------
+_INITIAL_DIFFICULTY = 0.3
+_INITIAL_STABILITY = 1.0
+_DIFFICULTY_WEIGHT = 0.1
+_DIFFICULTY_MEAN_REVERSION = 0.05
+_STABILITY_GROWTH_BASE = 1.0
+_STABILITY_DIFFICULTY_DECAY = 0.8
+_STABILITY_SELF_DECAY = 0.2
+_STABILITY_FAIL_PENALTY = 0.5
+
+
 @dataclass
 class ConceptState:
     """All review history for a single (user, concept) pair.
+
+    In addition to the raw review list the state now tracks two FSRS-inspired
+    latent variables that are updated after every review:
+
+    * **difficulty** (D) – how hard the concept is for this student (0 = easy,
+      1 = very hard).  Updated with mean-reversion towards the population
+      average.
+    * **stability** (S) – current memory stability in *days*.  Governs how
+      quickly the student forgets (larger → slower forgetting).
 
     Parameters
     ----------
@@ -55,19 +83,30 @@ class ConceptState:
         Opaque identifier for the concept (e.g. UUID string or integer).
     reviews:
         Chronologically-ordered list of :class:`ReviewEvent` objects.
+    difficulty:
+        Current difficulty estimate (0–1).
+    stability:
+        Current memory stability in days.
+    category:
+        Optional category / topic tag used for interleaved scheduling.
     """
 
     concept_id: str
     reviews: List[ReviewEvent] = field(default_factory=list)
+    difficulty: float = _INITIAL_DIFFICULTY
+    stability: float = _INITIAL_STABILITY
+    category: str = ""
 
     # ---------------------------------------------------------------------------
     # Convenience helpers
     # ---------------------------------------------------------------------------
 
     def add_review(self, score: float, timestamp: Optional[datetime] = None) -> ReviewEvent:
-        """Append a new review and return the created :class:`ReviewEvent`.
+        """Append a new review, update D/S, and return the :class:`ReviewEvent`.
 
         The ``elapsed_days`` is computed automatically from the previous review.
+        Difficulty and stability are updated using FSRS-inspired update rules
+        after the event is recorded.
         """
         if timestamp is None:
             timestamp = datetime.now(tz=timezone.utc)
@@ -84,7 +123,53 @@ class ConceptState:
             elapsed_days=elapsed_days,
         )
         self.reviews.append(event)
+
+        # ---- FSRS-inspired D/S update (Ye 2023) ----
+        self._update_difficulty(score)
+        self._update_stability(score, elapsed_days)
+
         return event
+
+    # ---- Internal D/S updates -----------------------------------------------
+
+    def _update_difficulty(self, score: float) -> None:
+        """Shift D towards population mean; decrease when score is high."""
+        delta_d = -_DIFFICULTY_WEIGHT * (score - 0.6)
+        mean_revert = _DIFFICULTY_MEAN_REVERSION * (_INITIAL_DIFFICULTY - self.difficulty)
+        self.difficulty = max(0.0, min(1.0, self.difficulty + delta_d + mean_revert))
+
+    def _update_stability(self, score: float, elapsed_days: float) -> None:
+        """Grow S on successful recall; shrink on failure."""
+        if score >= 0.6:
+            # Successful recall – stability grows
+            retrievability = self.retrievability(elapsed_days)
+            retrieval_bonus = 1.0 - retrievability  # desirable-difficulty bonus
+            growth = (
+                _STABILITY_GROWTH_BASE
+                * math.exp(-_STABILITY_DIFFICULTY_DECAY * self.difficulty)
+                * max(self.stability, 0.01) ** (-_STABILITY_SELF_DECAY)
+                * (1.0 + retrieval_bonus)
+            )
+            self.stability = max(self.stability * (1.0 + growth * score), 0.01)
+        else:
+            # Failed recall – stability shrinks
+            self.stability = max(
+                self.stability * _STABILITY_FAIL_PENALTY * (1.0 + score),
+                0.01,
+            )
+
+    # ---- Forgetting curve ---------------------------------------------------
+
+    def retrievability(self, elapsed_days: float) -> float:
+        """Power-law recall probability after *elapsed_days* since last review.
+
+        Uses a power-law forgetting curve ``R(t) = (1 + t/S)^(-1)`` which
+        better fits empirical data than the classic exponential Ebbinghaus
+        curve (Wixted & Ebbesen 1991, Wixted 2004).
+        """
+        return (1.0 + elapsed_days / max(self.stability, 1e-6)) ** (-1.0)
+
+    # ---- Feature extraction --------------------------------------------------
 
     @property
     def last_review(self) -> Optional[ReviewEvent]:
@@ -96,30 +181,62 @@ class ConceptState:
         return len(self.reviews)
 
     def as_feature_sequence(self) -> List[List[float]]:
-        """Return reviews as a list of ``[elapsed_days, score]`` feature vectors."""
-        return [[r.elapsed_days, r.score] for r in self.reviews]
+        """Return reviews as a list of enriched feature vectors.
 
-    # Ebbinghaus-based stability estimate (used as a baseline / warm-start)
+        Each vector is ``[elapsed_days, score, difficulty, stability,
+        normalised_review_count]``.  The extra features capture the
+        FSRS-inspired state at each time step, giving the model strictly
+        more information than the original ``[elapsed_days, score]``
+        representation.
+        """
+        n = len(self.reviews)
+        running_d = _INITIAL_DIFFICULTY
+        running_s = _INITIAL_STABILITY
+        features: List[List[float]] = []
+        for idx, r in enumerate(self.reviews):
+            norm_count = (idx + 1) / max(n, 1)
+            features.append([
+                r.elapsed_days,
+                r.score,
+                running_d,
+                running_s,
+                norm_count,
+            ])
+            # Replay D/S updates so the feature vector at each step reflects
+            # the state *before* that review.  After appending we advance.
+            delta_d = -_DIFFICULTY_WEIGHT * (r.score - 0.6)
+            mean_revert = _DIFFICULTY_MEAN_REVERSION * (_INITIAL_DIFFICULTY - running_d)
+            running_d = max(0.0, min(1.0, running_d + delta_d + mean_revert))
+
+            if r.score >= 0.6:
+                retrievability = (1.0 + r.elapsed_days / max(running_s, 1e-6)) ** (-1.0)
+                retrieval_bonus = 1.0 - retrievability
+                growth = (
+                    _STABILITY_GROWTH_BASE
+                    * math.exp(-_STABILITY_DIFFICULTY_DECAY * running_d)
+                    * max(running_s, 0.01) ** (-_STABILITY_SELF_DECAY)
+                    * (1.0 + retrieval_bonus)
+                )
+                running_s = max(running_s * (1.0 + growth * r.score), 0.01)
+            else:
+                running_s = max(
+                    running_s * _STABILITY_FAIL_PENALTY * (1.0 + r.score),
+                    0.01,
+                )
+        return features
+
+    # ---- Legacy helpers kept for backwards compatibility ---------------------
+
     def stability_estimate(self) -> float:
-        """Rough stability estimate using an exponential-forgetting heuristic.
+        """Power-law stability estimate.
 
-        Returns the average recall-weighted interval so far, which acts as a
-        prior on how long the student can wait between reviews.
+        Uses the tracked ``stability`` field directly, which is updated on
+        every review via FSRS-inspired rules.  Falls back to a 1-day default
+        for new concepts.
         """
         if not self.reviews:
-            return 1.0  # default 1-day interval for new concepts
-
-        weighted_sum = 0.0
-        weight_total = 0.0
-        for review in self.reviews:
-            w = review.score
-            weighted_sum += w * (review.elapsed_days + 1.0)
-            weight_total += w
-
-        if weight_total == 0:
-            return 1.0
-
-        return weighted_sum / weight_total
+            return _INITIAL_STABILITY
+        return self.stability
 
 
 @dataclass
@@ -137,10 +254,16 @@ class UserState:
     user_id: str
     concept_states: dict[str, ConceptState] = field(default_factory=dict)
 
-    def get_or_create_concept(self, concept_id: str) -> ConceptState:
+    def get_or_create_concept(
+        self,
+        concept_id: str,
+        category: str = "",
+    ) -> ConceptState:
         """Return the existing :class:`ConceptState` or create a new one."""
         if concept_id not in self.concept_states:
-            self.concept_states[concept_id] = ConceptState(concept_id=concept_id)
+            self.concept_states[concept_id] = ConceptState(
+                concept_id=concept_id, category=category,
+            )
         return self.concept_states[concept_id]
 
     @property

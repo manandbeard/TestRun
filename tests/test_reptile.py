@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import random
 
 import torch
@@ -15,7 +16,7 @@ SEED = 0
 
 
 def _simple_task(n_samples: int = 6) -> TaskSample:
-    """Build a tiny synthetic task sample."""
+    """Build a tiny synthetic task sample with 5-feature sequences."""
     rng = random.Random(SEED)
     task: TaskSample = []
     features: list[list[float]] = []
@@ -26,35 +27,37 @@ def _simple_task(n_samples: int = 6) -> TaskSample:
         label = 1.0 if rng.random() > 0.4 else 0.0
         sample = build_task_sample(features, interval, label)
         task.append(sample)
-        features.append([elapsed, score])
+        # 5-element features: elapsed, score, difficulty, stability, norm_count
+        norm_count = (i + 1) / n_samples
+        features.append([elapsed, score, 0.3, 1.0, norm_count])
     return task
 
 
 class TestBuildTaskSample:
     def test_shape(self):
-        features = [[0.0, 0.9], [5.0, 0.8]]
+        features = [[0.0, 0.9, 0.3, 1.0, 0.5], [5.0, 0.8, 0.28, 2.0, 1.0]]
         x, y = build_task_sample(features, 7.0, 1.0)
-        assert x.shape == (2, 3)  # (seq_len=2, input_size=3)
+        assert x.shape == (2, 6)  # (seq_len=2, input_size=6)
         assert y.item() == 1.0
 
     def test_empty_features(self):
         x, y = build_task_sample([], 3.0, 0.0)
-        assert x.shape == (1, 3)  # synthetic step for empty history
+        assert x.shape == (1, 6)  # synthetic step for empty history
         assert y.item() == 0.0
 
     def test_query_interval_appended_last(self):
-        features = [[2.0, 0.7], [5.0, 0.8]]
+        features = [[2.0, 0.7, 0.3, 1.0, 0.5], [5.0, 0.8, 0.28, 2.0, 1.0]]
         x, _ = build_task_sample(features, 10.0, 1.0)
-        # The last time step should contain the query interval in column 2
-        assert x[-1, 2].item() == pytest.approx(10.0)
-        # Earlier steps should have 0 in column 2
-        assert x[0, 2].item() == pytest.approx(0.0)
+        # The last time step should contain the query interval in the last column
+        assert x[-1, -1].item() == pytest.approx(10.0)
+        # Earlier steps should have 0 in the last column
+        assert x[0, -1].item() == pytest.approx(0.0)
 
 
 class TestReptileTrainer:
     def _trainer(self) -> ReptileTrainer:
         torch.manual_seed(SEED)
-        model = RecallLSTM(input_size=3, hidden_size=16, num_layers=1, dropout=0.0)
+        model = RecallLSTM(input_size=6, hidden_size=16, num_layers=1, dropout=0.0)
         return ReptileTrainer(model, inner_lr=0.05, inner_steps=3, meta_lr=0.1)
 
     def test_meta_train_runs(self):
@@ -110,3 +113,21 @@ class TestReptileTrainer:
 
         for b, a in zip(params_before, params_after):
             assert torch.allclose(b, a)
+
+    # ---- Cosine annealing tests ----
+
+    def test_cosine_meta_lr_at_start(self):
+        trainer = self._trainer()
+        lr = trainer._cosine_meta_lr(0, 100)
+        assert lr == pytest.approx(trainer.meta_lr, abs=1e-6)
+
+    def test_cosine_meta_lr_at_end(self):
+        trainer = self._trainer()
+        lr = trainer._cosine_meta_lr(100, 100)
+        assert lr == pytest.approx(trainer.meta_lr_min, abs=1e-6)
+
+    def test_cosine_meta_lr_at_midpoint(self):
+        trainer = self._trainer()
+        lr = trainer._cosine_meta_lr(50, 100)
+        expected = trainer.meta_lr_min + (trainer.meta_lr - trainer.meta_lr_min) * 0.5
+        assert lr == pytest.approx(expected, abs=1e-4)
