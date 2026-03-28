@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spaced Repetition Scheduler</title>
+<style>
+  :root { --bg:#f8f9fa; --card:#fff; --primary:#4361ee; --success:#2ec4b6;
+          --danger:#e63946; --text:#212529; --muted:#6c757d; --border:#dee2e6; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Segoe UI',system-ui,sans-serif; background:var(--bg);
+         color:var(--text); line-height:1.6; }
+  .container { max-width:960px; margin:0 auto; padding:1rem; }
+  h1 { color:var(--primary); margin-bottom:.5rem; }
+  h2 { font-size:1.15rem; margin-bottom:.5rem; color:var(--primary); }
+  .subtitle { color:var(--muted); margin-bottom:1.5rem; font-size:.9rem; }
+  .card { background:var(--card); border:1px solid var(--border);
+          border-radius:8px; padding:1.25rem; margin-bottom:1rem;
+          box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
+  @media(max-width:640px){ .grid{grid-template-columns:1fr;} }
+  label { display:block; font-weight:600; margin-bottom:.25rem; font-size:.85rem; }
+  input,select { width:100%; padding:.5rem .7rem; border:1px solid var(--border);
+                 border-radius:6px; font-size:.9rem; }
+  input:focus,select:focus { outline:none; border-color:var(--primary);
+                             box-shadow:0 0 0 3px rgba(67,97,238,.15); }
+  button { padding:.55rem 1.2rem; border:none; border-radius:6px; cursor:pointer;
+           font-size:.9rem; font-weight:600; color:#fff; background:var(--primary);
+           transition:opacity .15s; }
+  button:hover { opacity:.85; }
+  button.sm { padding:.35rem .8rem; font-size:.8rem; }
+  button.success { background:var(--success); }
+  button.danger  { background:var(--danger); }
+  .row { display:flex; gap:.5rem; align-items:flex-end; }
+  .row > * { flex:1; }
+  .row > button { flex:none; align-self:flex-end; }
+  table { width:100%; border-collapse:collapse; font-size:.85rem; }
+  th,td { padding:.45rem .6rem; text-align:left; border-bottom:1px solid var(--border); }
+  th { background:var(--bg); font-weight:600; }
+  .badge { display:inline-block; padding:.15rem .5rem; border-radius:12px;
+           font-size:.75rem; font-weight:600; }
+  .badge-cat { background:#e0e7ff; color:#3730a3; }
+  .empty { color:var(--muted); font-style:italic; padding:1rem 0; }
+  .score-btns { display:flex; gap:.4rem; flex-wrap:wrap; }
+  .score-btns button { min-width:3rem; }
+  #status { position:fixed; bottom:1rem; right:1rem; background:var(--primary);
+            color:#fff; padding:.5rem 1rem; border-radius:8px; font-size:.85rem;
+            opacity:0; transition:opacity .3s; pointer-events:none; }
+  #status.show { opacity:1; }
+  .curve-table td:nth-child(2) { font-family:monospace; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>🧠 Spaced Repetition Scheduler</h1>
+<p class="subtitle">Attention-LSTM + Reptile meta-learning — personalised study scheduling</p>
+
+<!-- User login -->
+<div class="card" id="login-card">
+  <h2>1. Choose your user ID</h2>
+  <div class="row">
+    <div><input id="user-id" placeholder="e.g. alice" value=""></div>
+    <button onclick="loginUser()">Start</button>
+  </div>
+</div>
+
+<!-- Main app (hidden until login) -->
+<div id="app" style="display:none;">
+
+  <!-- Add concept -->
+  <div class="card">
+    <h2>2. Add a concept to study</h2>
+    <div class="row">
+      <div><label>Concept</label><input id="concept-id" placeholder="e.g. photosynthesis"></div>
+      <div><label>Category</label><input id="concept-cat" placeholder="e.g. biology"></div>
+      <button onclick="addConcept()">Add</button>
+    </div>
+  </div>
+
+  <!-- Schedule -->
+  <div class="card">
+    <h2>3. Your study schedule</h2>
+    <div style="margin-bottom:.5rem;">
+      <label style="display:inline;"><input type="checkbox" id="interleave-check"> Interleave by category</label>
+      &nbsp;<button class="sm" onclick="loadSchedule()">Refresh</button>
+    </div>
+    <div id="schedule-area"><p class="empty">No concepts yet.</p></div>
+  </div>
+
+  <!-- Review -->
+  <div class="card">
+    <h2>4. Record a review</h2>
+    <div class="row" style="flex-wrap:wrap;">
+      <div style="flex:2;min-width:160px;">
+        <label>Concept</label>
+        <select id="review-concept"><option value="">— select —</option></select>
+      </div>
+      <div style="flex:3;min-width:200px;">
+        <label>Score (0 = forgot, 1 = perfect)</label>
+        <div class="score-btns">
+          <button class="sm danger"  onclick="submitReview(0.0)">0</button>
+          <button class="sm danger"  onclick="submitReview(0.2)">0.2</button>
+          <button class="sm"         onclick="submitReview(0.4)">0.4</button>
+          <button class="sm"         onclick="submitReview(0.6)">0.6</button>
+          <button class="sm success" onclick="submitReview(0.8)">0.8</button>
+          <button class="sm success" onclick="submitReview(1.0)">1.0</button>
+        </div>
+      </div>
+    </div>
+    <div id="review-result" style="margin-top:.5rem;"></div>
+  </div>
+
+  <!-- Recall curve -->
+  <div class="card">
+    <h2>5. Recall curve</h2>
+    <div class="row">
+      <div>
+        <label>Concept</label>
+        <select id="curve-concept"><option value="">— select —</option></select>
+      </div>
+      <button onclick="loadCurve()">Show</button>
+    </div>
+    <div id="curve-area" style="margin-top:.5rem;"></div>
+  </div>
+
+</div><!-- /app -->
+</div><!-- /container -->
+
+<div id="status"></div>
+
+<script>
+const API = '/api';
+let USER = '';
+
+function flash(msg) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+async function api(path, opts) {
+  const res = await fetch(API + path, opts);
+  const json = await res.json();
+  if (!res.ok) { flash(json.error || 'Error'); throw new Error(json.error); }
+  return json;
+}
+
+async function loginUser() {
+  USER = document.getElementById('user-id').value.trim();
+  if (!USER) { flash('Enter a user ID'); return; }
+  await api('/users', {method:'POST',headers:{'Content-Type':'application/json'},
+                        body:JSON.stringify({user_id:USER})});
+  document.getElementById('login-card').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  flash('Welcome, ' + USER + '!');
+  await refreshAll();
+}
+
+async function addConcept() {
+  const cid = document.getElementById('concept-id').value.trim();
+  const cat = document.getElementById('concept-cat').value.trim();
+  if (!cid) { flash('Enter a concept name'); return; }
+  await api(`/users/${encodeURIComponent(USER)}/concepts`,
+    {method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({concept_id:cid, category:cat})});
+  document.getElementById('concept-id').value = '';
+  document.getElementById('concept-cat').value = '';
+  flash('Concept added: ' + cid);
+  await refreshAll();
+}
+
+function populateSelects(concepts) {
+  ['review-concept','curve-concept'].forEach(id => {
+    const sel = document.getElementById(id);
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">— select —</option>';
+    concepts.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c; opt.textContent = c;
+      sel.appendChild(opt);
+    });
+    if (concepts.includes(cur)) sel.value = cur;
+  });
+}
+
+async function loadSchedule() {
+  const interleave = document.getElementById('interleave-check').checked;
+  const data = await api(`/users/${encodeURIComponent(USER)}/schedule?interleave=${interleave}`);
+  const area = document.getElementById('schedule-area');
+  if (!data.schedule.length) {
+    area.innerHTML = '<p class="empty">No concepts yet. Add one above!</p>';
+    populateSelects([]);
+    return;
+  }
+  let html = '<table><tr><th>#</th><th>Concept</th><th>Category</th><th>Interval</th><th>D</th><th>S</th><th>Reviews</th></tr>';
+  const concepts = [];
+  data.schedule.forEach((s,i) => {
+    concepts.push(s.concept_id);
+    const cat = s.category ? `<span class="badge badge-cat">${esc(s.category)}</span>` : '—';
+    html += `<tr><td>${i+1}</td><td>${esc(s.concept_id)}</td><td>${cat}</td>`
+          + `<td>${s.interval_days} d</td><td>${s.difficulty.toFixed(2)}</td>`
+          + `<td>${s.stability.toFixed(1)}</td><td>${s.review_count}</td></tr>`;
+  });
+  html += '</table>';
+  area.innerHTML = html;
+  populateSelects(concepts);
+}
+
+async function submitReview(score) {
+  const cid = document.getElementById('review-concept').value;
+  if (!cid) { flash('Select a concept first'); return; }
+  const data = await api(`/users/${encodeURIComponent(USER)}/concepts/${encodeURIComponent(cid)}/review`,
+    {method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({score})});
+  document.getElementById('review-result').innerHTML =
+    `<strong>${esc(cid)}</strong> reviewed (score ${score}) — D=${data.difficulty.toFixed(2)}, S=${data.stability.toFixed(1)}, reviews=${data.review_count}`;
+  flash('Review recorded');
+  await loadSchedule();
+}
+
+async function loadCurve() {
+  const cid = document.getElementById('curve-concept').value;
+  if (!cid) { flash('Select a concept'); return; }
+  const data = await api(`/users/${encodeURIComponent(USER)}/concepts/${encodeURIComponent(cid)}/recall-curve`);
+  const area = document.getElementById('curve-area');
+  let html = `<table class="curve-table"><tr><th>Interval (days)</th><th>P(recall)</th><th></th></tr>`;
+  data.curve.forEach(pt => {
+    const pct = (pt.recall_probability * 100).toFixed(1);
+    const bar = '█'.repeat(Math.round(pt.recall_probability * 30));
+    html += `<tr><td>${pt.interval_days}</td><td>${pct}%</td><td style="color:var(--primary);font-family:monospace;">${bar}</td></tr>`;
+  });
+  html += '</table>';
+  area.innerHTML = html;
+}
+
+async function refreshAll() {
+  await loadSchedule();
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+</script>
+</body>
+</html>

@@ -12,6 +12,7 @@ setup(
     install_requires=[
         "torch>=2.0.0",
         "numpy>=1.24.0",
+        "flask>=3.0.0",
     ],
     extras_require={
         "dev": ["pytest>=7.4.0"],

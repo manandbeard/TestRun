@@ -50,11 +50,14 @@ The system learns a weight initialisation that can be quickly adapted (personali
 | File | Description |
 |------|-------------|
 | `scheduler/data.py` | Data models: `ReviewEvent`, `ConceptState` (with FSRS-inspired D/S tracking), `UserState` |
-| `scheduler/model.py` | `RecallLSTM` – attention-augmented LSTM predicting P(recall) |
+| `scheduler/model.py` | `RecallLSTM` – attention-augmented LSTM predicting P(recall), with save/load support |
 | `scheduler/reptile.py` | `ReptileTrainer` – Reptile meta-learning with cosine LR + gradient clipping |
 | `scheduler/scheduler.py` | `SpacedRepetitionScheduler` – binary-search scheduling + interleaving |
-| `main.py` | End-to-end demo script |
-| `tests/` | Pytest unit tests (59 tests) |
+| `app.py` | Flask web application with REST API and single-page frontend |
+| `train_meta_model.py` | Pre-train a Reptile meta-model and save to `meta_model.pt` |
+| `templates/index.html` | Browser UI for study scheduling |
+| `main.py` | CLI demo script |
+| `tests/` | Pytest unit tests (83 tests) |
 
 ## Quick Start
 
@@ -64,19 +67,40 @@ The system learns a weight initialisation that can be quickly adapted (personali
 pip install -r requirements.txt
 ```
 
-### Run the demo
+### Run as a web app
+
+```bash
+# 1. Pre-train the meta-model (one-time, ~2 min)
+python train_meta_model.py
+
+# 2. Start the web server
+python app.py
+```
+
+Open http://localhost:5000 in your browser. Enter a user ID, add concepts with categories, record review scores, and see your personalised schedule with FSRS-tracked difficulty/stability and optional interleaving.
+
+### Run the CLI demo
 
 ```bash
 python main.py
 ```
-
-The demo generates synthetic review histories for 10 simulated users, runs 50 epochs of Reptile meta-training with cosine-annealed learning rate, personalises the model to a new student, and prints the recommended next-review interval for each concept with interleaved scheduling.
 
 ### Run tests
 
 ```bash
 pytest tests/ -v
 ```
+
+### REST API
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/users` | Create/get a user (`{"user_id": "alice"}`) |
+| `GET`  | `/api/users/<id>` | Get full user state |
+| `POST` | `/api/users/<id>/concepts` | Add a concept (`{"concept_id": "...", "category": "..."}`) |
+| `POST` | `/api/users/<id>/concepts/<cid>/review` | Record a review (`{"score": 0.85}`) |
+| `GET`  | `/api/users/<id>/schedule[?interleave=true]` | Get personalised review schedule |
+| `GET`  | `/api/users/<id>/concepts/<cid>/recall-curve` | Get predicted recall probabilities |
 
 ## Architecture Details
 

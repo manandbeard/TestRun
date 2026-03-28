@@ -50,6 +50,23 @@ class ReviewEvent:
                 f"elapsed_days must be >= 0, got {self.elapsed_days}"
             )
 
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-compatible dictionary."""
+        return {
+            "timestamp": self.timestamp.isoformat(),
+            "score": self.score,
+            "elapsed_days": self.elapsed_days,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ReviewEvent":
+        """Deserialise from a dictionary."""
+        return cls(
+            timestamp=datetime.fromisoformat(data["timestamp"]),
+            score=data["score"],
+            elapsed_days=data["elapsed_days"],
+        )
+
 
 # ---------------------------------------------------------------------------
 # FSRS-inspired parameter defaults
@@ -241,6 +258,30 @@ class ConceptState:
             return _INITIAL_STABILITY
         return self.stability
 
+    # ---- Serialisation -------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-compatible dictionary."""
+        return {
+            "concept_id": self.concept_id,
+            "reviews": [r.to_dict() for r in self.reviews],
+            "difficulty": self.difficulty,
+            "stability": self.stability,
+            "category": self.category,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ConceptState":
+        """Deserialise from a dictionary."""
+        cs = cls(
+            concept_id=data["concept_id"],
+            difficulty=data.get("difficulty", _INITIAL_DIFFICULTY),
+            stability=data.get("stability", _INITIAL_STABILITY),
+            category=data.get("category", ""),
+        )
+        cs.reviews = [ReviewEvent.from_dict(r) for r in data.get("reviews", [])]
+        return cs
+
 
 @dataclass
 class UserState:
@@ -275,3 +316,23 @@ class UserState:
 
     def total_reviews(self) -> int:
         return sum(cs.review_count for cs in self.concept_states.values())
+
+    # ---- Serialisation -------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-compatible dictionary."""
+        return {
+            "user_id": self.user_id,
+            "concept_states": {
+                cid: cs.to_dict()
+                for cid, cs in self.concept_states.items()
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "UserState":
+        """Deserialise from a dictionary."""
+        user = cls(user_id=data["user_id"])
+        for cid, cs_data in data.get("concept_states", {}).items():
+            user.concept_states[cid] = ConceptState.from_dict(cs_data)
+        return user

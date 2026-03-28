@@ -148,3 +148,33 @@ class RecallLSTM(nn.Module):
         with torch.no_grad():
             prob = self(x).item()
         return float(prob)
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self, path: str) -> None:
+        """Save model weights and architecture hyperparameters to *path*."""
+        torch.save(
+            {
+                "input_size": self.input_size,
+                "hidden_size": self.hidden_size,
+                "num_layers": self.num_layers,
+                "state_dict": self.state_dict(),
+            },
+            path,
+        )
+
+    @classmethod
+    def load(cls, path: str, device: torch.device | None = None) -> "RecallLSTM":
+        """Load a model from *path* and return it."""
+        checkpoint = torch.load(path, map_location=device or "cpu", weights_only=True)
+        model = cls(
+            input_size=checkpoint["input_size"],
+            hidden_size=checkpoint["hidden_size"],
+            num_layers=checkpoint["num_layers"],
+        )
+        model.load_state_dict(checkpoint["state_dict"])
+        if device is not None:
+            model.to(device)
+        return model
